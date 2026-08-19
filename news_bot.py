@@ -1244,7 +1244,11 @@ def process_commands(token, chat_id, cfg):
             if cmd == '/start':
                 db_add_user(cid)
                 reply = handle_command(text, cfg, cid)
-                if reply:
+                if isinstance(reply, tuple) and len(reply) == 2:
+                    msg, bg_fn = reply
+                    send_telegram(msg, token, cid, html=False)
+                    threading.Thread(target=bg_fn, daemon=True).start()
+                elif reply:
                     send_telegram(reply, token, cid, html=False)
                 continue
             # Các lệnh khác chỉ admin mới được dùng
@@ -1252,7 +1256,11 @@ def process_commands(token, chat_id, cfg):
                 send_telegram("⛔ Chỉ admin mới được dùng lệnh này.", token, cid, html=False)
                 continue
             reply = handle_command(text, cfg, cid)
-            if reply:
+            if isinstance(reply, tuple) and len(reply) == 2:
+                msg, bg_fn = reply
+                send_telegram(msg, token, cid, html=False)
+                threading.Thread(target=bg_fn, daemon=True).start()
+            elif reply:
                 send_telegram(reply, token, cid, html=False)
         if max_id > last:
             cfg['last_update_id'] = max_id
@@ -1334,9 +1342,9 @@ def handle_command(text, cfg, chat_id=None):
         save_config(cfg)
         return f"✅ Bản tin tổng hợp lúc: {', '.join(ok_times) if ok_times else '(trống)'}"
     if cmd == '/test':
-        log("🔄 /test — chạy 1 vòng quét + gửi ngay")
-        run_once()
-        return "✅ Đã chạy xong 1 vòng quét. Kiểm tra tin đã gửi nhé!"
+        log("🔄 /test — chạy 1 vòng quét + gửi ngay (background)")
+        return ("__BG__🔄 Đang quét tin và gửi ngay... Tin sẽ đến trong vài giây!",
+                lambda: run_once())
     if cmd == '/tamngung':
         cfg['paused'] = True
         save_config(cfg)
@@ -1415,9 +1423,19 @@ def handle_command(text, cfg, chat_id=None):
                 f"Lần chạy gần nhất: {st.get('last_run', 'chưa có')}\n"
                 f"Nguồn: {len(SOURCES)}")
     if cmd == '/tinmoi':
-        return handle_tinmoi(arg, cfg, chat_id)
+        def _bg_tinmoi():
+            result = handle_tinmoi(arg, cfg, chat_id)
+            if result:
+                send_telegram(result, get_token(), chat_id, html=False)
+        threading.Thread(target=_bg_tinmoi, daemon=True).start()
+        return "📰 Đang tải tin mới... Tin sẽ hiện trong vài giây!"
     if cmd == '/tinday':
-        return handle_tinday(chat_id)
+        def _bg_tinday():
+            result = handle_tinday(chat_id)
+            if result:
+                send_telegram(result, get_token(), chat_id, html=False)
+        threading.Thread(target=_bg_tinday, daemon=True).start()
+        return "📋 Đang tổng hợp tin hôm nay... Sẽ hiện trong vài giây!"
     return "Không hiểu lệnh. Gõ /help để xem danh sách."
 
 def handle_tinmoi(arg, cfg, chat_id=None):
