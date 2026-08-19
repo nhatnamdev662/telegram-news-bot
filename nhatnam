@@ -1,0 +1,105 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# nhatnam — chạy news bot Telegram
+#   nhatnam config    -> cấu hình token + chat id (lần đầu bắt buộc)
+#   nhatnam 30        -> chạy bot, dò tin mỗi 30 phút + tự cài chạy khi bật máy (Ctrl+C dừng)
+#   nhatnam test      -> thử 1 lần
+#   nhatnam log       -> xem log
+#   nhatnam setup     -> cài đặt lại (Python + thư viện)
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$DIR/news_bot.py" ]; then
+    for ALT in "$HOME/storage/downloads/botnews" "$HOME/botnews"; do
+        if [ -f "$ALT/news_bot.py" ]; then DIR="$ALT"; break; fi
+    done
+fi
+if [ ! -f "$DIR/news_bot.py" ]; then
+    echo "❌ Không tìm thấy news_bot.py. Chạy lại lệnh cài đặt từ GitHub:"
+    echo '   bash -c "$(curl -fsSL https://raw.githubusercontent.com/nhatnamdev662/telegram-news-bot/main/install.sh)"'
+    exit 1
+fi
+cd "$DIR" || { echo "❌ Không vào được $DIR"; exit 1; }
+ENV="$DIR/.env"
+
+missing() {
+    if [ ! -f "$ENV" ] || ! grep -qE '^TELEGRAM_BOT_TOKEN=.+' "$ENV" 2>/dev/null; then
+        echo "❌ Chưa có bot token. Chạy: nhatnam config"
+        exit 1
+    fi
+}
+
+setup_boot() {
+    local MIN="$1"
+    BOOT_DIR="$HOME/.termux/boot"
+    mkdir -p "$BOOT_DIR"
+    cat > "$BOOT_DIR/news-bot.sh" <<BOOTEOF
+#!/data/data/com.termux/files/usr/bin/bash
+# Tự chạy news bot khi bật máy (Termux:Boot) — tự khởi động lại nếu bot chết
+cd "$DIR"
+nohup bash -c "while true; do
+    NEWS_INTERVAL=$((MIN * 60)) python3 $DIR/news_bot.py loop >> $DIR/news_bot.log 2>&1
+    sleep 5
+done" >/dev/null 2>&1 &
+BOOTEOF
+    chmod +x "$BOOT_DIR/news-bot.sh"
+    echo "✅ Đã cài tự chạy khi bật máy (mỗi ${MIN} phút) — cần app Termux:Boot."
+}
+
+start_loop() {
+    local MIN="$1"
+    echo "🚀 Chạy bot — dò tin mỗi ${MIN} phút (Ctrl+C để dừng)..."
+    NEWS_INTERVAL=$((MIN * 60)) python3 "$DIR/news_bot.py" loop
+}
+
+do_config() {
+    [ -f "$ENV" ] || cp "$DIR/.env.example" "$ENV"
+    echo "⚙️  CẤU HÌNH BOT (Enter = giữ nguyên)"
+    CUR=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV" | head -1 | cut -d= -f2-)
+    read -p "1) Bot token — lấy từ @BotFather (/newbot) [${CUR:0:12}...]: " V
+    [ -n "$V" ] && sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=$V|" "$ENV"
+    CUR=$(grep -E '^TELEGRAM_CHAT_ID=' "$ENV" | head -1 | cut -d= -f2-)
+    read -p "2) Chat ID nhận tin [${CUR:-trống — bot tự tìm khi bạn nhắn /start}]: " V
+    [ -n "$V" ] && sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=$V|" "$ENV"
+    echo ""
+    echo "✅ Đã lưu cấu hình."
+    echo "💡 Chạy bot: nhatnam 30   (30 = dò tin mỗi 30 phút)"
+}
+
+help_me() {
+    echo "Cách dùng: nhatnam [lệnh]"
+    echo "  nhatnam config   cấu hình token + chat id (lần đầu bắt buộc)"
+    echo "  nhatnam 30       chạy bot — dò tin mỗi 30 phút (Ctrl+C dừng)"
+    echo "  nhatnam test     thử gửi 1 lượt tin"
+    echo "  nhatnam log      xem log"
+    echo "  nhatnam setup    cài đặt lại (Python + thư viện)"
+}
+
+case "${1:-}" in
+    "")
+        help_me
+        ;;
+    config)
+        do_config
+        ;;
+    test|once)
+        missing
+        python3 "$DIR/news_bot.py" once
+        ;;
+    log)
+        [ -f "$DIR/news_bot.log" ] && tail -n 50 "$DIR/news_bot.log" || echo "Chưa có log."
+        ;;
+    setup)
+        bash "$DIR/setup.sh"
+        ;;
+    help|-h|--help)
+        help_me
+        ;;
+    *)
+        if [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]; then
+            missing
+            setup_boot "$1"
+            start_loop "$1"
+        else
+            echo "Không hiểu lệnh '$1'."
+            help_me
+        fi
+        ;;
+esac
