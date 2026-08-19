@@ -532,11 +532,11 @@ def _fetch_with_retry(url, retries=2):
                 'User-Agent': ua,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-            }, timeout=15)
+            }, timeout=8)
             if r.status_code == 200:
                 return r
             if r.status_code in (403, 429, 503):
-                time.sleep(1 * (attempt + 1))
+                time.sleep(0.5 * (attempt + 1))
                 continue
             return r
         except (requests.ConnectionError, requests.Timeout):
@@ -985,7 +985,7 @@ def get_image(e):
 def fetch_og_image(url):
     """Fetch Open Graph image from article page as fallback."""
     try:
-        r = requests.get(url, headers={'User-Agent': UA}, timeout=10)
+        r = requests.get(url, headers={'User-Agent': UA}, timeout=5)
         if r.status_code != 200:
             return ''
         # Try og:image
@@ -1045,7 +1045,7 @@ def send_telegram_photo(image, caption, token, chat_id, reply_markup=None):
                        "caption": caption, "parse_mode": "HTML"}
             if reply_markup:
                 payload["reply_markup"] = reply_markup
-            r = requests.post(url, json=payload, timeout=30)
+            r = requests.post(url, json=payload, timeout=15)
             data = r.json()
             ok = data.get('ok') is True
             if ok:
@@ -1125,7 +1125,7 @@ def send_telegram(text, token, chat_id, html=True, reply_markup=None):
         payload["reply_markup"] = reply_markup
     for attempt in range(RETRY_MAX):
         try:
-            r = requests.post(url, json=payload, timeout=30)
+            r = requests.post(url, json=payload, timeout=15)
             data = r.json()
             ok = data.get('ok') is True
             if ok:
@@ -1220,8 +1220,8 @@ def process_commands(token, chat_id, cfg):
         last = int(cfg.get('last_update_id', 0))
         try:
             r = requests.get(f"https://api.telegram.org/bot{token}/getUpdates",
-                             params={"offset": last + 1, "timeout": 1,
-                                     "allowed_updates": ["message"]}, timeout=15)
+                             params={"offset": last + 1, "timeout": 0,
+                                     "allowed_updates": ["message"]}, timeout=5)
             data = r.json()
         except Exception as ex:
             log(f"Lỗi getUpdates: {ex}")
@@ -1422,6 +1422,11 @@ def handle_command(text, cfg, chat_id=None):
 
 def handle_tinmoi(arg, cfg, chat_id=None):
     arts = fetch_all(cfg)
+    # Use RSS sapo directly — skip slow article fetch for quick preview
+    for a in arts:
+        if not a.get('summary'):
+            sapo = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', a.get('desc', '')))).strip()
+            a['summary'] = _trim_summary(sapo) if sapo else a['title']
     arts = interleave(arts)
     cat_filter = None
     if arg:
@@ -1533,32 +1538,37 @@ def _run_once(max_send=None):
     if max_n < 1:
         max_n = 10
     sent = 0
-    for i, a in enumerate(new):
-        if sent >= max_n:
-            log(f"  ℹ Đạt giới hạn {max_n} bài/vòng — {len(new) - i} bài còn lại chờ vòng sau.")
+    # Phase 1: Remove duplicates
+    to_process = []
+    for a in new:
+        if sent + len(to_process) >= max_n:
             break
         if is_title_dup(a, st):
             log(f"  ⏭ Trùng nội dung: {a['title'][:60]} | {a['source']}")
             st['seen'][key_of(a)] = 1
             continue
-        a['summary'], a['quote'], a['quote_speaker'] = make_summary_full(a['title'], a['link'], a['desc'])
-        if cfg.get('translate') and is_english(a['title']):
-            a['title_vi'] = translate_vi(a['title'])
-            if a.get('summary'):
-                a['summary_vi'] = translate_vi(a['summary'])
+        to_process.append(a)
+    # Phase 2: Parallel fetch summaries + translate (biggest bottleneck)
+    def _summarize_one(art):
+        art['summary'], art['quote'], art['quote_speaker'] = make_summary_full(art['title'], art['link'], art['desc'])
+        if cfg.get('translate') and is_english(art['title']):
+            art['title_vi'] = translate_vi(art['title'])
+            if art.get('summary'):
+                art['summary_vi'] = translate_vi(art['summary'])
+        return art
+    if to_process:
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            to_process = list(ex.map(_summarize_one, to_process))
+    # Phase 3: Filter + send (fast, no network)
+    for a in to_process:
         breaking = is_breaking_news(a)
         if not breaking and not matches_filters(a, cfg):
             st['seen'][key_of(a)] = 1
             continue
-        # Try OG image fallback if no RSS image
         if not a.get('image') and a.get('link'):
             a['image'] = fetch_og_image(a['link'])
-        # Inline keyboard
         inline_kb = safe_button_url(a.get("link", ""), a.get("title_vi", a.get("title", "")))
-        # Gửi tới TẤT CẢ những người đã /start bot (bảng users). Nếu chưa ai
-        # subscribe (bot mới cài), fallback về chat_id mặc định trong .env.
         targets = db_list_users() or [chat_id]
-        # Filter bot ID — không tự gửi cho chính mình
         bot_id = get_bot_id(token)
         if bot_id:
             targets = [t for t in targets if t != bot_id]
@@ -1585,7 +1595,7 @@ def _run_once(max_send=None):
             pass
         save_state(st)
         sent += 1
-        time.sleep(2)
+        time.sleep(0.3)
     if hm in cfg.get('schedule', []):
         today = now.strftime('%Y-%m-%d')
         if st.get('last_digest', {}).get(hm) != today:
@@ -1734,7 +1744,7 @@ def poll_commands_forever():
         except Exception as ex:
             fail += 1
             log(f"Lỗi nhận lệnh Telegram: {ex}")
-        time.sleep(min(60, 3 * max(fail, 1)))
+        time.sleep(min(10, 2 * max(fail, 1)))
 
 
 # ---------------------------------------------------------------------------
